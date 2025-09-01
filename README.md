@@ -2,4 +2,4 @@
 
 
 
-<a href="https://github.com/@theluxlime">lux</a>
+<a href="https://github.com/theluxlime">lux</a>
