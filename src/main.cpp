@@ -4,6 +4,10 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <iostream>
 #include <vector>
+#include <unordered_map>
+#include <queue>
+#include <algorithm>
+#include <memory>
 
 #include "shader.h"
 #include "chunk.h"
@@ -16,12 +20,102 @@ Camera camera;
 float deltatime = 0.0f;
 float lastframe = 0.0f;
 
+struct ChunkCoord {
+    int x, z;
+    bool operator==(const ChunkCoord& other) const {
+        return x == other.x && z == other.z;
+    }
+};
+
+struct ChunkCoordHash {
+    size_t operator()(const ChunkCoord& coord) const {
+        return std::hash<int>()(coord.x) ^ (std::hash<int>()(coord.z) << 1);
+    }
+};
+
+std::unordered_map<ChunkCoord, std::unique_ptr<Chunk>, ChunkCoordHash> loadedChunks;
+std::queue<ChunkCoord> chunksToLoad;
+std::queue<ChunkCoord> chunksToUnload;
+const int renderDistance = 12;
+const int unloadDistance = 16;
+const int maxChunksPerFrame = 1;
+int chunksProcessedThisFrame = 0;
+
+ChunkCoord lastPlayerChunk = {-9999, -9999};
+
 void framebuffersizecallback(GLFWwindow *window, int width, int height) {
     glViewport(0, 0, width, height);
 }
 
 void mousecallback(GLFWwindow *window, double xpos, double ypos) {
     camera.processMouse(xpos, ypos);
+}
+
+ChunkCoord getChunkCoord(glm::vec3 position) {
+    return {static_cast<int>(floor(position.x / Chunk::size)), 
+            static_cast<int>(floor(position.z / Chunk::size))};
+}
+
+float getChunkDistance(const ChunkCoord& a, const ChunkCoord& b) {
+    return sqrt((a.x - b.x) * (a.x - b.x) + (a.z - b.z) * (a.z - b.z));
+}
+
+void updateChunkLoading() {
+    ChunkCoord playerChunk = getChunkCoord(camera.position);
+    chunksProcessedThisFrame = 0;
+    
+    if (playerChunk.x != lastPlayerChunk.x || playerChunk.z != lastPlayerChunk.z) {
+        for (int x = playerChunk.x - renderDistance; x <= playerChunk.x + renderDistance; x++) {
+            for (int z = playerChunk.z - renderDistance; z <= playerChunk.z + renderDistance; z++) {
+                ChunkCoord coord = {x, z};
+                float distance = getChunkDistance(playerChunk, coord);
+                
+                if (distance <= renderDistance && loadedChunks.find(coord) == loadedChunks.end()) {
+                    bool alreadyQueued = false;
+                    std::queue<ChunkCoord> tempQueue = chunksToLoad;
+                    while (!tempQueue.empty()) {
+                        if (tempQueue.front().x == coord.x && tempQueue.front().z == coord.z) {
+                            alreadyQueued = true;
+                            break;
+                        }
+                        tempQueue.pop();
+                    }
+                    if (!alreadyQueued) {
+                        chunksToLoad.push(coord);
+                    }
+                }
+            }
+        }
+        
+        for (auto it = loadedChunks.begin(); it != loadedChunks.end(); ++it) {
+            float distance = getChunkDistance(playerChunk, it->first);
+            if (distance > unloadDistance) {
+                chunksToUnload.push(it->first);
+            }
+        }
+        
+        lastPlayerChunk = playerChunk;
+    }
+    
+    while (!chunksToUnload.empty() && chunksProcessedThisFrame < maxChunksPerFrame) {
+        ChunkCoord coord = chunksToUnload.front();
+        chunksToUnload.pop();
+        loadedChunks.erase(coord);
+        chunksProcessedThisFrame++;
+    }
+    
+    while (!chunksToLoad.empty() && chunksProcessedThisFrame < maxChunksPerFrame) {
+        ChunkCoord coord = chunksToLoad.front();
+        chunksToLoad.pop();
+        
+        ChunkCoord currentPlayerChunk = getChunkCoord(camera.position);
+        float distance = getChunkDistance(currentPlayerChunk, coord);
+        
+        if (distance <= renderDistance) {
+            loadedChunks[coord] = std::make_unique<Chunk>(coord.x, coord.z);
+            chunksProcessedThisFrame++;
+        }
+    }
 }
 
 int main() {
@@ -55,11 +149,11 @@ int main() {
     glm::vec3 lightpos(50.0f, 100.0f, 50.0f);
     shader.setvec3("lightpos", lightpos);
     
-    std::vector<Chunk> chunks;
-    const int renderdistance = 10;
-    for (int x = -renderdistance; x <= renderdistance; x++) {
-        for (int z = -renderdistance; z <= renderdistance; z++) {
-            chunks.emplace_back(x, z);
+    ChunkCoord initialChunk = getChunkCoord(camera.position);
+    for (int x = initialChunk.x - 3; x <= initialChunk.x + 3; x++) {
+        for (int z = initialChunk.z - 3; z <= initialChunk.z + 3; z++) {
+            ChunkCoord coord = {x, z};
+            loadedChunks[coord] = std::make_unique<Chunk>(coord.x, coord.z);
         }
     }
     
@@ -71,6 +165,7 @@ int main() {
         lastframe = currentframe;
         
         camera.processKeyboard(window, deltatime);
+        updateChunkLoading();
         
         glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -85,12 +180,15 @@ int main() {
         shader.setmat4("view", view);
         shader.setvec3("viewpos", camera.position);
         
-        for (auto &chunk : chunks) {
+        for (auto& pair : loadedChunks) {
+            const ChunkCoord& coord = pair.first;
+            auto& chunk = pair.second;
+            
             glm::mat4 model = glm::translate(glm::mat4(1.0f), 
-                                           glm::vec3(chunk.chunkx * Chunk::size, 0.0f, 
-                                                    chunk.chunkz * Chunk::size));
+                                           glm::vec3(coord.x * Chunk::size, 0.0f, 
+                                                    coord.z * Chunk::size));
             shader.setmat4("model", model);
-            chunk.draw();
+            chunk->draw();
         }
         
         glfwSwapBuffers(window);
